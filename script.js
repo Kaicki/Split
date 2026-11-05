@@ -1,8 +1,5 @@
-
 import { FFmpeg } from "https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/esm/index.js";
-
 import { toBlobURL } from "https://cdn.jsdelivr.net/npm/@ffmpeg/util@0.12.2/dist/esm/index.js";
-
 import JSZip from "https://cdn.jsdelivr.net/npm/jszip@3.10.1/+esm";
 
 // ELEMENTOS
@@ -37,6 +34,8 @@ let clips = [];
 let videoURL = null;
 let isProcessing = false;
 let ffmpegLoaded = false;
+let currentClip = 0;
+let totalClips = 1;
 
 // FORMATAÇÃO DE TEMPO
 function formatTime(seconds) {
@@ -46,17 +45,14 @@ function formatTime(seconds) {
     const secs = s % 60;
 
     if (hours > 0) {
-        return [
-            hours,
-            minutes,
-            secs
-        ].map(n => String(n).padStart(2, "0")).join(":");
+        return [hours, minutes, secs]
+            .map(n => String(n).padStart(2, "0"))
+            .join(":");
     }
 
-    return [
-        minutes,
-        secs
-    ].map(n => String(n).padStart(2, "0")).join(":");
+    return [minutes, secs]
+        .map(n => String(n).padStart(2, "0"))
+        .join(":");
 }
 
 // FORMATAÇÃO DE TAMANHO
@@ -75,8 +71,13 @@ function updateProgress(value, status, detail) {
     progressBar.style.width = percent + "%";
     progressPercent.textContent = Math.floor(percent) + "%";
 
-    if (status) progressStatus.textContent = status;
-    if (detail) progressDetails.textContent = detail;
+    if (status) {
+        progressStatus.textContent = status;
+    }
+
+    if (detail) {
+        progressDetails.textContent = detail;
+    }
 }
 
 // SELECIONAR DURAÇÃO
@@ -126,16 +127,18 @@ function clearResults() {
     });
 
     clips = [];
-
     clipsList.innerHTML = "";
     results.classList.add("hidden");
 }
 
 // CARREGAR VÍDEO
 function loadVideo(file) {
-    if (isProcessing) return;
+    if (isProcessing || !file) return;
 
-    if (!file) return;
+    if (!file.size || file.size < 1) {
+        alert("O arquivo selecionado está vazio. Escolha outro vídeo.");
+        return;
+    }
 
     const allowedExtensions = /\.(mp4|mov|mkv|webm)$/i;
 
@@ -147,6 +150,7 @@ function loadVideo(file) {
     clearResults();
 
     selectedFile = file;
+    videoDuration = 0;
 
     if (videoURL) {
         URL.revokeObjectURL(videoURL);
@@ -165,23 +169,32 @@ function loadVideo(file) {
 
     startBtn.disabled = true;
 
-    videoPreview.onloadedmetadata = () => {
-        videoDuration = videoPreview.duration;
+    // Lê a duração quando os metadados estiverem disponíveis.
+    const readVideoDuration = () => {
+        if (
+            Number.isFinite(videoPreview.duration) &&
+            videoPreview.duration > 0
+        ) {
+            videoDuration = videoPreview.duration;
 
-        fileDetails.textContent =
-            formatSize(file.size) + " • " + formatTime(videoDuration);
+            fileDetails.textContent =
+                formatSize(file.size) + " • " + formatTime(videoDuration);
 
-        if (!Number.isFinite(videoDuration) || videoDuration <= 0) {
-            alert("Não foi possível identificar a duração do vídeo.");
-            return;
+            startBtn.disabled = false;
         }
-
-        startBtn.disabled = false;
     };
 
+    videoPreview.onloadedmetadata = readVideoDuration;
+    videoPreview.ondurationchange = readVideoDuration;
+
     videoPreview.onerror = () => {
-        alert("Não foi possível abrir esse vídeo no navegador. Tente MP4.");
-        resetVideo();
+        fileDetails.textContent =
+            formatSize(file.size) + " • Prévia indisponível";
+
+        alert(
+            "O navegador não conseguiu abrir a prévia deste vídeo. " +
+            "Tente usar um arquivo MP4 compatível."
+        );
     };
 }
 
@@ -234,17 +247,24 @@ function resetVideo() {
     startBtn.disabled = true;
 
     clearResults();
+
+    progressContainer.classList.add("hidden");
 }
 
 removeVideo.addEventListener("click", resetVideo);
 
-// CARREGAR FFmpeg
+// CARREGAR FFMPEG
 async function loadFFmpeg() {
     if (ffmpegLoaded) return;
 
-    updateProgress(0, "Carregando motor de vídeo...", "Preparando FFmpeg.wasm.");
+    updateProgress(
+        0,
+        "Carregando motor de vídeo...",
+        "Preparando FFmpeg.wasm. Isso pode levar alguns instantes."
+    );
 
-    const baseURL = "https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/umd";
+    const baseURL =
+        "https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/umd";
 
     const coreURL = await toBlobURL(
         `${baseURL}/ffmpeg-core.js`,
@@ -268,21 +288,17 @@ async function loadFFmpeg() {
 ffmpeg.on("progress", ({ progress }) => {
     if (!isProcessing || !Number.isFinite(progress)) return;
 
-    const current = window.currentClip || 0;
-    const total = window.totalClips || 1;
-
-    const overall = ((current + progress) / total) * 100;
+    const overall = ((currentClip + progress) / totalClips) * 100;
 
     updateProgress(
         overall,
         "Cortando vídeo...",
-        `Processando parte ${current + 1} de ${total}.`
+        `Processando parte ${currentClip + 1} de ${totalClips}.`
     );
 });
 
 // CRIAR UM CORTE
 async function createClip(inputName, outputName, start, duration) {
-
     const args = [
         "-ss", start.toFixed(3),
         "-i", inputName,
@@ -308,7 +324,9 @@ async function createClip(inputName, outputName, start, duration) {
     const exitCode = await ffmpeg.exec(args);
 
     if (exitCode !== 0) {
-        throw new Error("O FFmpeg não conseguiu processar uma das partes.");
+        throw new Error(
+            "O FFmpeg não conseguiu processar uma das partes."
+        );
     }
 
     const data = await ffmpeg.readFile(outputName);
@@ -322,7 +340,7 @@ async function createClip(inputName, outputName, start, duration) {
 function renderResults() {
     clipsList.innerHTML = "";
 
-    clips.forEach((clip, index) => {
+    clips.forEach(clip => {
         const card = document.createElement("div");
         card.className = "clip-card";
 
@@ -330,6 +348,7 @@ function renderResults() {
         video.src = clip.url;
         video.controls = true;
         video.preload = "metadata";
+        video.playsInline = true;
 
         const row = document.createElement("div");
         row.className = "clip-row";
@@ -386,10 +405,13 @@ async function startProcessing() {
         return;
     }
 
-    const totalClips = Math.ceil(videoDuration / cutDuration);
+    totalClips = Math.ceil(videoDuration / cutDuration);
 
     if (totalClips > 500) {
-        alert("Esse vídeo geraria mais de 500 arquivos. Escolha uma duração maior.");
+        alert(
+            "Esse vídeo geraria mais de 500 arquivos. " +
+            "Escolha uma duração maior."
+        );
         return;
     }
 
@@ -397,28 +419,40 @@ async function startProcessing() {
 
     startBtn.disabled = true;
     removeVideo.disabled = true;
+    videoInput.disabled = true;
 
     progressContainer.classList.remove("hidden");
 
     clearResults();
 
+    let inputName = null;
+
     try {
-        updateProgress(0, "Iniciando...", "Preparando os arquivos.");
+        updateProgress(
+            0,
+            "Iniciando...",
+            "Preparando os arquivos."
+        );
 
         await loadFFmpeg();
 
-        updateProgress(0, "Carregando vídeo...", "Enviando o arquivo para a memória do navegador.");
+        updateProgress(
+            0,
+            "Carregando vídeo...",
+            "Enviando o arquivo para a memória do navegador."
+        );
 
-        const extension = selectedFile.name.split(".").pop().toLowerCase();
+        const extension = selectedFile.name
+            .split(".")
+            .pop()
+            .toLowerCase();
 
-        const inputName = `input.${extension}`;
+        inputName = `input.${extension}`;
 
         await ffmpeg.writeFile(
             inputName,
             new Uint8Array(await selectedFile.arrayBuffer())
         );
-
-        window.totalClips = totalClips;
 
         const safeName = selectedFile.name
             .replace(/\.[^/.]+$/, "")
@@ -426,8 +460,7 @@ async function startProcessing() {
             .slice(0, 50) || "video";
 
         for (let i = 0; i < totalClips; i++) {
-
-            window.currentClip = i;
+            currentClip = i;
 
             const start = i * cutDuration;
 
@@ -455,7 +488,8 @@ async function startProcessing() {
             const url = URL.createObjectURL(blob);
 
             clips.push({
-                name: `${safeName}_parte_${String(i + 1).padStart(3, "0")}.mp4`,
+                name:
+                    `${safeName}_parte_${String(i + 1).padStart(3, "0")}.mp4`,
                 duration,
                 blob,
                 url
@@ -464,13 +498,11 @@ async function startProcessing() {
             await ffmpeg.deleteFile(outputName);
         }
 
-        try {
-            await ffmpeg.deleteFile(inputName);
-        } catch (error) {
-            console.warn("Arquivo temporário não removido:", error);
-        }
-
-        updateProgress(100, "Concluído!", "Todos os cortes foram gerados.");
+        updateProgress(
+            100,
+            "Concluído!",
+            "Todos os cortes foram gerados."
+        );
 
         renderResults();
 
@@ -488,10 +520,19 @@ async function startProcessing() {
         );
 
     } finally {
+        if (inputName && ffmpegLoaded) {
+            try {
+                await ffmpeg.deleteFile(inputName);
+            } catch (error) {
+                console.warn("Arquivo temporário não removido:", error);
+            }
+        }
+
         isProcessing = false;
 
-        startBtn.disabled = !selectedFile;
+        startBtn.disabled = !selectedFile || !videoDuration;
         removeVideo.disabled = false;
+        videoInput.disabled = false;
     }
 }
 
@@ -528,7 +569,9 @@ downloadAll.addEventListener("click", async () => {
         link.click();
         link.remove();
 
-        setTimeout(() => URL.revokeObjectURL(zipURL), 60000);
+        setTimeout(() => {
+            URL.revokeObjectURL(zipURL);
+        }, 60000);
 
     } catch (error) {
         console.error(error);
